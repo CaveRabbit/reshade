@@ -14,6 +14,7 @@
 #include <cstring> // std::strcmp
 #include <algorithm> // std::find_if, std::remove, std::sort
 #include <Unknwn.h>
+#include <queue>
 
 using namespace reshade::api;
 
@@ -23,7 +24,23 @@ enum class draw_stats_heuristic : unsigned int
 {
 	prefer_vertices = 0,
 	vertices,
-	drawcalls
+	drawcalls,
+
+	// Rolling modal average to be worked on. -Caverabbit
+	// The objective is to alleviate flickering behaviour in games where multiple buffers have similar but fluctuating values.
+	// This then causes generic depth to rapidly jump between buffers.
+	// By using a modal average over a rolling time frame, we can smooth out these fluctuations and hopefully prevent rapid flickering.
+	//
+	// Another idea is to assign a "highest value reached" in a given time frame which should more or less achieve the same result except
+	// it might be more accurate with picking the correct buffer to be used.
+	//rolling_mode_vertices,
+	//rolling_mode_drawcalls,
+
+	// Add new modes to use buffers with the lowest indices / draw calls
+	// This works for games that creates a depth buffer that have very few draw calls
+	// This appears to be common for forward rendered games and / or uses specific Anti-Aliasing techniques.
+	lowest_vertices,
+	lowest_drawcalls
 };
 enum class aspect_ratio_heuristic : unsigned int
 {
@@ -57,6 +74,11 @@ struct draw_stats
 	uint32_t vertices = 0;
 	uint32_t drawcalls = 0;
 	uint32_t drawcalls_indirect = 0;
+
+	// Rolling average - Work in progress
+	//uint32_t vertices_rollingmode = 0;
+	//uint32_t drawcalls_rollingmode = 0;
+
 	viewport last_viewport = {};
 
 	bool operator>(const draw_stats &other) const
@@ -66,12 +88,20 @@ struct draw_stats
 		if (s_draw_stats_heuristic == draw_stats_heuristic::drawcalls)
 			return drawcalls > other.drawcalls;
 
+		// Use less than operator instead of greater than when respective modes are selected.
+		// While it is a bit less clear, this implementation requires the least amount of rewrites in logic.
+		if (s_draw_stats_heuristic == draw_stats_heuristic::lowest_vertices)
+			return vertices < other.vertices;
+		if (s_draw_stats_heuristic == draw_stats_heuristic::lowest_drawcalls)
+			return drawcalls < other.drawcalls;
+
 		return (drawcalls_indirect < (drawcalls / 3) ?
 			// Choose snapshot with the most vertices, since that is likely to contain the main scene
 			vertices > other.vertices :
 			// Or check draw calls, since vertices may not be accurate if application is using indirect draw calls
 			drawcalls > other.drawcalls);
 	}
+
 };
 struct clear_stats : public draw_stats
 {
@@ -203,6 +233,10 @@ struct depth_stencil_resource
 	// Index of the frame in which the depth-stencil was last/first seen used in
 	uint64_t last_used_in_frame = std::numeric_limits<uint64_t>::max();
 	uint64_t first_used_in_frame = std::numeric_limits<uint64_t>::max();
+
+	std::queue<uint32_t> history_vertices;
+	std::queue<uint32_t> history_drawcalls;
+
 };
 
 struct __declspec(uuid("e006e162-33ac-4b9f-b10f-0e15335c7bdb")) generic_depth_device_data
@@ -932,6 +966,28 @@ static void on_present(command_queue *, swapchain *swapchain, const rect *, cons
 	}
 }
 
+// Rolling average - Work in progress
+
+//static uint32_t compute_mode(const std::deque<uint32_t> &values)
+//{
+//	if (values.empty())
+//		return 0;
+//
+//	std::unordered_map<uint32_t, uint32_t> freq;
+//
+//	for (uint32_t v : values)
+//		freq[v]++;
+//
+//	uint32_t mode = values.front();
+//	uint32_t best_count = 0;
+//
+//	for (auto &[value, count] : freq)
+//		if (count > best_count)
+//			best_count = count, mode = value;
+//
+//	return mode;
+//}
+
 static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_list, resource_view, resource_view)
 {
 	device *const device = runtime->get_device();
@@ -955,6 +1011,10 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 	for (auto &[depth_stencil, info] : current_depth_stencil_resources)
 	{
+
+		// Rolling average - Work in progress
+		//auto &res = device_data->depth_stencil_resources[depth_stencil];
+
 		if (info.last_frame_stats.total.drawcalls == 0 || (info.last_frame_stats.total.vertices <= 3 && info.last_frame_stats.total.drawcalls_indirect == 0))
 			continue; // Skip unused
 
@@ -1182,7 +1242,15 @@ static void draw_settings_overlay(effect_runtime *runtime)
 	const char *const draw_stats_heuristic_items[] = {
 		"Default",
 		"Higher vertices",
-		"Higher draw calls"
+		"Higher draw calls",
+
+		// Rolling average - Work in progress
+		//"rolling_mode_vertices",
+		//"rolling_mode_drawcalls",
+
+		// New lowest modes
+		"Lowest vertices",
+		"Lowest draw calls"
 	};
 	if (ImGui::Combo("Draw stats heuristic", reinterpret_cast<int *>(&s_draw_stats_heuristic), draw_stats_heuristic_items, static_cast<int>(std::size(draw_stats_heuristic_items))))
 	{
